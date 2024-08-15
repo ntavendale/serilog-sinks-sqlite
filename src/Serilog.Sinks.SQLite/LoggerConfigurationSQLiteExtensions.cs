@@ -41,6 +41,8 @@ namespace Serilog
         /// <param name="retentionCheckInterval">Time period to execute TTL process. Time span should be in 15 minutes increment</param>
         /// <param name="batchSize">Number of messages to save as batch to database. Default is 10, max 1000</param>
         /// <param name="levelSwitch">
+        /// <param name="neverCrash">Do not crash if database file becomes corrupted. Defaults to false for backwards compatibility.</param>
+        /// <param name="backupCorruptedFileOnInitialization">Backup database file on initialization if it corrupted. neverCrash must be true.</param>
         /// A switch allowing the pass-through minimum level to be changed at runtime.
         /// </param>
         /// <param name="maxDatabaseSize">Maximum database file size can grow in MB. Default 10 MB, maximum 20 GB</param>
@@ -59,7 +61,9 @@ namespace Serilog
             LoggingLevelSwitch levelSwitch = null,
             uint batchSize = 100,
             uint maxDatabaseSize = 10,
-            bool rollOver = true)
+            bool rollOver = true,
+            bool neverCrash = false,
+            bool backupCorruptedFileOnInitialization = true)
         {
             if (loggerConfiguration == null) {
                 SelfLog.WriteLine("Logger configuration is null");
@@ -96,7 +100,8 @@ namespace Serilog
                         retentionCheckInterval,
                         batchSize,
                         maxDatabaseSize,
-                        rollOver),
+                        rollOver,
+                        neverCrash),
                     restrictedToMinimumLevel,
                     levelSwitch);
             }

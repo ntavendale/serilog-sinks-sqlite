@@ -35,6 +35,8 @@ namespace Serilog.Sinks.SQLite
         private readonly bool _storeTimestampInUtc;
         private readonly uint _maxDatabaseSize;
         private readonly bool _rollOver;
+        private readonly bool _neverCrash;
+        private readonly bool _backupCorruptedFileOnInitialization;
         private readonly string _tableName;
         private readonly TimeSpan? _retentionPeriod;
         private readonly Timer _retentionTimer;
@@ -54,7 +56,9 @@ namespace Serilog.Sinks.SQLite
             TimeSpan? retentionCheckInterval,
             uint batchSize = 100,
             uint maxDatabaseSize = 10,
-            bool rollOver = true) : base(batchSize: (int)batchSize, maxBufferSize: 100_000)
+            bool rollOver = true,
+            bool neverCrash = false,
+            bool backupCorruptedFileOnInitialization = true) : base(batchSize: (int)batchSize, maxBufferSize: 100_000)
         {
             _databasePath = sqlLiteDbPath;
             _tableName = tableName;
@@ -62,13 +66,25 @@ namespace Serilog.Sinks.SQLite
             _storeTimestampInUtc = storeTimestampInUtc;
             _maxDatabaseSize = maxDatabaseSize;
             _rollOver = rollOver;
-
+            _neverCrash = neverCrash;
+            _backupCorruptedFileOnInitialization = backupCorruptedFileOnInitialization;
             if (maxDatabaseSize > MaxSupportedDatabaseSize)
             {
                 throw new SQLiteException($"Database size greater than {MaxSupportedDatabaseSize} MB is not supported");
             }
 
-            InitializeDatabase();
+            try
+            {
+                InitializeDatabase();
+            }
+            catch (Exception ex)
+            {
+                SelfLog.WriteLine(ex.Message);
+                if (!_neverCrash)
+                {
+                    throw;
+                }
+            }
 
             if (retentionPeriod.HasValue)
             {
@@ -104,13 +120,13 @@ namespace Serilog.Sinks.SQLite
 
         private void InitializeDatabase()
         {
-            using (var conn = GetSqLiteConnection())
+            using (var conn = GetSqLiteConnection(true))
             {
                 CreateSqlTable(conn);
             }
         }
 
-        private SQLiteConnection GetSqLiteConnection()
+        private SQLiteConnection GetSqLiteConnection(bool initializing = false)
         {
             var sqlConString = new SQLiteConnectionStringBuilder
             {
@@ -123,8 +139,27 @@ namespace Serilog.Sinks.SQLite
             }.ConnectionString;
 
             var sqLiteConnection = new SQLiteConnection(sqlConString);
-            sqLiteConnection.Open();
-
+            try
+            {
+                sqLiteConnection.Open();
+            }
+            catch (Exception ex)
+            {
+                // If process is killed while writing then db file may become corrupted and won't open.
+                // Often we see a malformed disk image error. Unless we handle this case, application will crash.
+                if (initializing && _backupCorruptedFileOnInitialization)
+                {
+                    // We only back up when initializing to in case the exception on open would be caused by something else
+                    // like write permissions errors.  Don't want to be creating a backup for every attempted use that goes wrong.
+                    var dbExtension = ".ERR";
+                    var newFilePath = Path.Combine(Path.GetDirectoryName(_databasePath) ?? "Logs",
+                        $"{Path.GetFileNameWithoutExtension(_databasePath)}-{DateTime.Now:yyyyMMdd_HHmmss.ff}{dbExtension}");
+                    File.Move(_databasePath, newFilePath);
+                    SelfLog.WriteLine("Database could not open. Attempt to back up and delete.");
+                    SelfLog.WriteLine(ex.ToString());
+                }
+                sqLiteConnection.Open();
+            }
             return sqLiteConnection;
         }
 
@@ -167,11 +202,22 @@ namespace Serilog.Sinks.SQLite
             var epoch = DateTimeOffset.Now.Subtract(_retentionPeriod.Value);
             using (var sqlConnection = GetSqLiteConnection())
             {
-                using (var cmd = CreateSqlDeleteCommand(sqlConnection, epoch))
+                try
                 {
-                    SelfLog.WriteLine("Deleting log entries older than {0}", epoch);
-                    var ret = cmd.ExecuteNonQuery();
-                    SelfLog.WriteLine($"{ret} records deleted");
+                    using (var cmd = CreateSqlDeleteCommand(sqlConnection, epoch))
+                    {
+                        SelfLog.WriteLine("Deleting log entries older than {0}", epoch);
+                        var ret = cmd.ExecuteNonQuery();
+                        SelfLog.WriteLine($"{ret} records deleted");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    SelfLog.WriteLine(ex.Message);
+                    if (!_neverCrash)
+                    {
+                        throw;
+                    }
                 }
             }
         }
@@ -213,45 +259,57 @@ namespace Serilog.Sinks.SQLite
             await semaphoreSlim.WaitAsync().ConfigureAwait(false);
             try
             {
-                using (var sqlConnection = GetSqLiteConnection())
+                try
                 {
-                    try
+                    using (var sqlConnection = GetSqLiteConnection())
                     {
-                        await WriteToDatabaseAsync(logEventsBatch, sqlConnection).ConfigureAwait(false);
-                        return true;
-                    }
-                    catch (SQLiteException e)
-                    {
-                        SelfLog.WriteLine(e.Message);
-
-                        if (e.ResultCode != SQLiteErrorCode.Full)
-                            return false;
-
-                        if (_rollOver == false)
+                        try
                         {
-                            SelfLog.WriteLine("Discarding log excessive of max database");
-
+                            await WriteToDatabaseAsync(logEventsBatch, sqlConnection).ConfigureAwait(false);
                             return true;
                         }
+                        catch (SQLiteException e)
+                        {
+                            SelfLog.WriteLine(e.Message);
 
-                        var dbExtension = Path.GetExtension(_databasePath);
+                            if (e.ResultCode != SQLiteErrorCode.Full)
+                                return false;
 
-                        var newFilePath = Path.Combine(Path.GetDirectoryName(_databasePath) ?? "Logs",
-                            $"{Path.GetFileNameWithoutExtension(_databasePath)}-{DateTime.Now:yyyyMMdd_HHmmss.ff}{dbExtension}");
-                         
-                        File.Copy(_databasePath, newFilePath, true);
+                            if (_rollOver == false)
+                            {
+                                SelfLog.WriteLine("Discarding log excessive of max database");
 
-                        TruncateLog(sqlConnection);
-                        await WriteToDatabaseAsync(logEventsBatch, sqlConnection).ConfigureAwait(false);
+                                return true;
+                            }
 
-                        SelfLog.WriteLine($"Rolling database to {newFilePath}");
-                        return true;
+                            var dbExtension = Path.GetExtension(_databasePath);
+
+                            var newFilePath = Path.Combine(Path.GetDirectoryName(_databasePath) ?? "Logs",
+                                $"{Path.GetFileNameWithoutExtension(_databasePath)}-{DateTime.Now:yyyyMMdd_HHmmss.ff}{dbExtension}");
+
+                            File.Copy(_databasePath, newFilePath, true);
+
+                            TruncateLog(sqlConnection);
+                            await WriteToDatabaseAsync(logEventsBatch, sqlConnection).ConfigureAwait(false);
+
+                            SelfLog.WriteLine($"Rolling database to {newFilePath}");
+                            return true;
+                        }
+                        catch (Exception e)
+                        {
+                            SelfLog.WriteLine(e.Message);
+                            return false;
+                        }
                     }
-                    catch (Exception e)
+                }
+                catch (Exception ex)
+                {
+                    SelfLog.WriteLine(ex.Message);
+                    if (!_neverCrash)
                     {
-                        SelfLog.WriteLine(e.Message);
-                        return false;
+                        throw;
                     }
+                    return false;
                 }
             }
             finally
