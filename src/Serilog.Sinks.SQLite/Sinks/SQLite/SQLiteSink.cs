@@ -147,7 +147,7 @@ namespace Serilog.Sinks.SQLite
             {
                 // If process is killed while writing then db file may become corrupted and won't open.
                 // Often we see a malformed disk image error. Unless we handle this case, application will crash.
-                if (initializing && _backupCorruptedFileOnInitialization)
+                if (initializing && _backupCorruptedFileOnInitialization && _neverCrash)
                 {
                     // We only back up when initializing to in case the exception on open would be caused by something else
                     // like write permissions errors.  Don't want to be creating a backup for every attempted use that goes wrong.
