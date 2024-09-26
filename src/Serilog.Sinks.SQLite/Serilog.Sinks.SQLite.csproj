@@ -1,5 +1,8 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
-    <PropertyGroup>
+	<PropertyGroup>
+		<NoWarn>$(NoWarn);NETSDK1206</NoWarn>
+	</PropertyGroup>
+	<PropertyGroup>
         <AssemblyTitle>Serilog.Sinks.SQLite</AssemblyTitle>
         <Authors>Saleem Mirza</Authors>
         <AssemblyName>Serilog.Sinks.SQLite</AssemblyName>

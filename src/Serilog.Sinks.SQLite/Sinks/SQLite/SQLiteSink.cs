@@ -120,10 +120,19 @@ namespace Serilog.Sinks.SQLite
 
         private void InitializeDatabase()
         {
-            using (var conn = GetSqLiteConnection(true))
+            semaphoreSlim.Wait();
+            try
             {
-                CreateSqlTable(conn);
+                using (var conn = GetSqLiteConnection(true))
+                {
+                    CreateSqlTable(conn);
+                }
             }
+            finally
+            {
+                semaphoreSlim.Release();
+            }
+            
         }
 
         private SQLiteConnection GetSqLiteConnection(bool initializing = false)
@@ -167,7 +176,7 @@ namespace Serilog.Sinks.SQLite
         {
             var colDefs = "id INTEGER PRIMARY KEY AUTOINCREMENT,";
             colDefs += "Timestamp TEXT,";
-            colDefs += "Level VARCHAR(10),";
+            colDefs += "Level TEXT,";
             colDefs += "Exception TEXT,";
             colDefs += "RenderedMessage TEXT,";
             colDefs += "Properties TEXT";
@@ -200,9 +209,9 @@ namespace Serilog.Sinks.SQLite
         private void ApplyRetentionPolicy()
         {
             var epoch = DateTimeOffset.Now.Subtract(_retentionPeriod.Value);
-            using (var sqlConnection = GetSqLiteConnection())
+            try
             {
-                try
+                using (var sqlConnection = GetSqLiteConnection())
                 {
                     using (var cmd = CreateSqlDeleteCommand(sqlConnection, epoch))
                     {
@@ -210,14 +219,15 @@ namespace Serilog.Sinks.SQLite
                         var ret = cmd.ExecuteNonQuery();
                         SelfLog.WriteLine($"{ret} records deleted");
                     }
+                    
                 }
-                catch (Exception ex)
+            }
+            catch (Exception ex)
+            {
+                SelfLog.WriteLine(ex.Message);
+                if (!_neverCrash)
                 {
-                    SelfLog.WriteLine(ex.Message);
-                    if (!_neverCrash)
-                    {
-                        throw;
-                    }
+                    throw;
                 }
             }
         }
